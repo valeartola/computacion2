@@ -1,0 +1,21 @@
+# Networking Asíncrono
+aiohttp
+
+# Parsing HTML
+beautifulsoup4
+lxml
+
+# Procesamiento de Imágenes
+Pillow
+
+# Screenshots y Análisis Avanzado
+playwright
+
+# Utilidades Asíncronas
+aiofiles   
+
+requests
+
+# Dependencias necesarias solo para el desarrollo y testing
+pytest
+pytest-asyncio
