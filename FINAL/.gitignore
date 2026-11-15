@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Redis / Celery (archivos que se generan solos al correr)
+dump.rdb
+celerybeat-schedule*
+
+# Logs y temporales
+*.log
+nohup.out
+
+# Editor / sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

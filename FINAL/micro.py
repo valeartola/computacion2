@@ -34,6 +34,9 @@ class Micro:
         self.posicion = 0.0              # metros recorridos desde el inicio de la ruta
         self.proxima = 1                 # índice de la próxima parada; el tramo actual es proxima - 1
         self.parada_hasta = 0.0          # hasta cuándo se queda en la parada actual (reloj monotónico)
+        self.viaje_t0 = time.time()      # hora en que salió de la terminal en este viaje
+        self.parada_actual = None        # nombre de la parada donde está parado
+        self.t_llegada = None            # segundos que tardó, desde que salió, en llegar a esa parada
 
         self.averiado = threading.Event()  # el simulador lo activa para provocar una avería
         self.detener = threading.Event()   # pide que el micro termine
@@ -67,9 +70,12 @@ class Micro:
             if self.posicion >= destino:                         # llegó a la parada
                 self.posicion = float(destino)
                 self.parada_hasta = ahora + PARADA_SEGUNDOS
+                self.parada_actual = self.paradas[self.proxima][0]
+                self.t_llegada = round(time.time() - self.viaje_t0, 1)   # el worker lo compara con el horario previsto
                 if self.proxima == len(self.paradas) - 1:        # fin de la ruta: vuelve a empezar
                     self.posicion = 0.0
                     self.proxima = 1
+                    self.viaje_t0 = time.time() + PARADA_SEGUNDOS   # el nuevo viaje cuenta desde que sale
                 else:
                     self.proxima += 1
 
@@ -81,6 +87,9 @@ class Micro:
             "tramo": id_tramo(self.linea, tramo),
             "velocidad": round(velocidad, 1),   # km/h
             "en_parada": en_parada,
+            # Solo mientras está en una parada: cuál es y cuánto tardó en llegar (None si no)
+            "parada": self.parada_actual if en_parada else None,
+            "t_llegada": self.t_llegada if en_parada else None,
         }
 
     # ---------------------------------------------------------------- red
@@ -135,6 +144,7 @@ class Micro:
     # ---------------------------------------------------------------- bucle principal
     def run(self):
         self.log(f"arranca en la línea {self.linea}")
+        self.viaje_t0 = time.time()
         siguiente = time.monotonic()
         try:
             while not self.detener.is_set():
@@ -162,11 +172,17 @@ def main():
     p.add_argument("--batch", type=int, default=5, help="lecturas por lote")
     p.add_argument("--trafico", type=float, default=0.0,
                    help="nivel de tráfico 0..1 en toda la línea (para probar; después lo maneja el simulador)")
+    p.add_argument("--averia-en", type=float, default=None, metavar="SEG",
+                   help="se descompone a los SEG segundos de arrancar (para probar; después lo provoca el simulador)")
     a = p.parse_args()
 
     for tramo in range(len(LINEAS[a.linea]["paradas"]) - 1):
         trafico.set(a.linea, tramo, a.trafico)
     micro = Micro(a.id, a.linea, a.host, a.port, a.intervalo, a.batch)
+    if a.averia_en is not None:
+        temporizador = threading.Timer(a.averia_en, micro.averiado.set)
+        temporizador.daemon = True
+        temporizador.start()
     try:
         micro.run()
     except KeyboardInterrupt:

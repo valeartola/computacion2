@@ -29,6 +29,28 @@ def id_tramo(linea: int, tramo: int) -> str:
     return f"L{linea}-T{tramo}"
 
 
+def horarios_previstos(linea: int) -> dict:
+    """Horario previsto de llegada a cada parada, en segundos desde que el micro sale de la terminal.
+
+    Se calcula suponiendo calle libre (velocidad base) y la espera fija en cada parada.
+    Con el tráfico alto el micro llega más tarde que esto, y esa diferencia es la demora.
+    """
+    paradas = LINEAS[linea]["paradas"]
+    metros_por_segundo = VELOCIDAD_BASE_KMH / 3.6
+    t = 0.0
+    horarios = {}
+    for i in range(1, len(paradas)):
+        t += (paradas[i][1] - paradas[i - 1][1]) / metros_por_segundo   # viaje hasta esa parada
+        horarios[paradas[i][0]] = round(t)
+        t += PARADA_SEGUNDOS                                            # y la espera antes de salir
+    return horarios
+
+
+# Línea -> {parada: segundos previstos}. Con los valores de arriba, la línea 1 da
+# Plaza 80 s, Hospital 160 s, Estación 240 s y Cierre 330 s.
+HORARIOS = {linea: horarios_previstos(linea) for linea in LINEAS}
+
+
 class Trafico:
     """Nivel de tráfico de cada tramo, entre 0 (libre) y 1 (colapsado).
 
