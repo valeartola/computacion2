@@ -16,7 +16,7 @@ CANAL_ALERTAS = "alertas"
 def describir(a: dict) -> str:
     if a["tipo"] == "congestion":
         return (f"CONGESTION en {a['tramo']}: velocidad promedio "
-                f"{a['velocidad_promedio']} km/h ({a['lecturas']} lecturas)")
+                f"{a['velocidad_promedio']} km/h ({a['lecturas']} lecturas de {a['micros']} micros)")
     if a["tipo"] == "detenido":
         return (f"MICRO DETENIDO: micro {a['micro_id']} quieto hace {a['segundos']} s "
                 f"en {a['tramo']}, metro {a['posicion']}")

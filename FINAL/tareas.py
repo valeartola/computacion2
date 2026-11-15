@@ -29,6 +29,7 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 VENTANA_S = float(os.environ.get("TW_VENTANA_S", 30))              # tamaño de la ventana
 UMBRAL_CONGESTION_KMH = float(os.environ.get("TW_UMBRAL_KMH", 15))  # promedio por debajo = congestión
 MIN_LECTURAS = int(os.environ.get("TW_MIN_LECTURAS", 3))            # lecturas mínimas para decidir
+MIN_MICROS = int(os.environ.get("TW_MIN_MICROS", 2))                # micros distintos para hablar de congestión
 DETENIDO_S = float(os.environ.get("TW_DETENIDO_S", 15))            # quieto este tiempo fuera de parada = detenido
 DEMORA_S = float(os.environ.get("TW_DEMORA_S", 120))                # más tarde que esto respecto del horario = demora
 COOLDOWN_S = int(os.environ.get("TW_COOLDOWN_S", 60))               # no repetir la misma alerta antes
@@ -86,6 +87,11 @@ def evaluar_congestion(r, tramo, ahora):
     en_marcha = [lec for lec in lecturas if not lec["en_parada"]]
     if len(en_marcha) < MIN_LECTURAS:
         return None
+    # Congestión es que VARIOS micros vayan lentos. Un único micro quieto es una avería
+    # (la regla de micro detenido), no un embotellamiento.
+    micros = {lec["micro_id"] for lec in en_marcha}
+    if len(micros) < MIN_MICROS:
+        return None
     promedio = sum(lec["velocidad"] for lec in en_marcha) / len(en_marcha)
     if promedio >= UMBRAL_CONGESTION_KMH:
         return None
@@ -95,6 +101,7 @@ def evaluar_congestion(r, tramo, ahora):
         "tramo": tramo,
         "velocidad_promedio": round(promedio, 1),
         "lecturas": len(en_marcha),
+        "micros": len(micros),
         "ts": ahora,
     })
 

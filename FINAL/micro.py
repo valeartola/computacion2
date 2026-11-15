@@ -8,6 +8,7 @@ Uso solo (para probar):
 Más adelante el simulador crea varios Micro como hilos.
 """
 import argparse
+import queue
 import socket
 import threading
 import time
@@ -40,6 +41,7 @@ class Micro:
 
         self.averiado = threading.Event()  # el simulador lo activa para provocar una avería
         self.detener = threading.Event()   # pide que el micro termine
+        self.ordenes = queue.Queue()       # órdenes del simulador a este micro: "averiar" o "reparar"
 
         self.sock = None
         self.n_lote = 0
@@ -141,6 +143,20 @@ class Micro:
             self.log(f"conexión perdida ({e}); quedan {len(self.pendientes)} lotes sin confirmar")
             self._cerrar()
 
+    def _atender_ordenes(self):
+        """Lee, sin esperar, las órdenes que el simulador dejó en la Queue de este micro."""
+        while True:
+            try:
+                orden = self.ordenes.get_nowait()
+            except queue.Empty:
+                return
+            if orden == "averiar":
+                self.averiado.set()
+                self.log("se descompuso")
+            elif orden == "reparar":
+                self.averiado.clear()
+                self.log("lo repararon, sigue su camino")
+
     # ---------------------------------------------------------------- bucle principal
     def run(self):
         self.log(f"arranca en la línea {self.linea}")
@@ -148,6 +164,7 @@ class Micro:
         siguiente = time.monotonic()
         try:
             while not self.detener.is_set():
+                self._atender_ordenes()
                 self.lote_actual.append(self._tick())
                 if len(self.lote_actual) >= self.batch:
                     self.n_lote += 1
