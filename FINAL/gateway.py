@@ -12,14 +12,22 @@ Uso:
 """
 import argparse
 import asyncio
+import re
 
 from protocolo import empaquetar, leer_mensaje_async
 
 TIMEOUT_SESION = 10  # segundos sin recibir nada de un micro antes de cerrar su sesión
 
+# Formas permitidas. Los ids se usan para armar claves de Redis, así que se limitan a letras, números, _ y -.
+ID_VALIDO = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+TRAMO_VALIDO = re.compile(r"^L\d+-T\d+$")
+CAMPOS_LECTURA = ("micro_id", "linea", "ts", "posicion", "tramo", "velocidad", "en_parada")
+MAX_LECTURAS_POR_LOTE = 100
+
 conexiones = {}   # micro_id -> writer de su conexión abierta (servirá para avisarle al micro)
 sesiones = {}     # micro_id -> id de sesión del micro (cambia cada vez que el micro se reinicia)
 ultimo_lote = {}  # micro_id -> número del último lote encolado (para descartar repetidos)
+candados = {}     # micro_id -> asyncio.Lock: una sola conexión a la vez revisa y encola lotes de ese micro
 
 
 analizar_lote = None  # la tarea de Celery; se carga en el arranque salvo con --sin-cola
@@ -40,9 +48,66 @@ async def encolar(lote: dict) -> None:
           f"última en {ultima['tramo']} a {ultima['velocidad']} km/h", flush=True)
 
 
-def lote_valido(msg: dict) -> bool:
-    return (msg.get("tipo") == "lote" and isinstance(msg.get("n"), int)
-            and isinstance(msg.get("lecturas"), list) and len(msg["lecturas"]) > 0)
+def es_numero(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool)   # bool es un int en Python, no lo queremos
+
+
+def motivo_hola_invalido(hola):
+    """Devuelve por qué el 'hola' no sirve, o None si está bien."""
+    if not isinstance(hola, dict):
+        return "no es un diccionario"
+    if hola.get("tipo") != "hola":
+        return "no empezó con 'hola'"
+    if not ID_VALIDO.match(str(hola.get("micro_id", ""))):
+        return "micro_id inválido"
+    return None
+
+
+def motivo_lectura_invalida(lec, micro_id):
+    """Devuelve por qué una lectura no sirve, o None si está bien."""
+    if not isinstance(lec, dict):
+        return "una lectura no es un diccionario"
+    for campo in CAMPOS_LECTURA:
+        if campo not in lec:
+            return f"a una lectura le falta '{campo}'"
+    if str(lec["micro_id"]) != micro_id:
+        return "una lectura es de otro micro"
+    if not (es_numero(lec["ts"]) and es_numero(lec["posicion"]) and es_numero(lec["velocidad"])):
+        return "ts, posicion o velocidad no son números"
+    if lec["posicion"] < 0 or lec["velocidad"] < 0:
+        return "posicion o velocidad negativas"
+    if not isinstance(lec["en_parada"], bool):
+        return "en_parada tiene que ser verdadero o falso"
+    if not (isinstance(lec["tramo"], str) and TRAMO_VALIDO.match(lec["tramo"])):
+        return "tramo inválido"
+    if lec.get("parada") is not None and not isinstance(lec["parada"], str):
+        return "parada tiene que ser texto"
+    if lec.get("t_llegada") is not None and not es_numero(lec["t_llegada"]):
+        return "t_llegada tiene que ser un número"
+    return None
+
+
+def motivo_lote_invalido(msg, micro_id):
+    """Devuelve por qué el lote no sirve, o None si está bien."""
+    if not isinstance(msg, dict):
+        return "no es un diccionario"
+    if msg.get("tipo") != "lote":
+        return "el tipo no es 'lote'"
+    n = msg.get("n")
+    if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+        return "'n' tiene que ser un entero positivo"
+    if str(msg.get("micro_id")) != micro_id:
+        return "el lote dice ser de otro micro"
+    lecturas = msg.get("lecturas")
+    if not isinstance(lecturas, list) or not lecturas:
+        return "'lecturas' tiene que ser una lista con algo adentro"
+    if len(lecturas) > MAX_LECTURAS_POR_LOTE:
+        return "demasiadas lecturas en un lote"
+    for lec in lecturas:
+        motivo = motivo_lectura_invalida(lec, micro_id)
+        if motivo:
+            return motivo
+    return None
 
 
 async def atender(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -51,8 +116,9 @@ async def atender(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     micro_id = None
     try:
         hola = await asyncio.wait_for(leer_mensaje_async(reader), TIMEOUT_SESION)
-        if hola.get("tipo") != "hola" or "micro_id" not in hola:
-            print(f"{peer}: no empezó con 'hola', lo cierro", flush=True)
+        motivo = motivo_hola_invalido(hola)
+        if motivo:
+            print(f"{peer}: 'hola' rechazado ({motivo}), cierro la conexión", flush=True)
             return
         micro_id = str(hola["micro_id"])
         # Si el micro se reinició (sesión nueva), su numeración de lotes vuelve a empezar de 1.
@@ -64,20 +130,27 @@ async def atender(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
 
         while True:
             msg = await asyncio.wait_for(leer_mensaje_async(reader), TIMEOUT_SESION)
-            if not lote_valido(msg):
-                print(f"micro {micro_id}: mensaje inválido, lo descarto", flush=True)
-                continue
+            motivo = motivo_lote_invalido(msg, micro_id)
+            if motivo:
+                # Un micro de verdad nunca manda esto: es una violación del protocolo, se corta la conexión.
+                print(f"micro {micro_id}: lote rechazado ({motivo}), cierro la conexión", flush=True)
+                return
             n = msg["n"]
-            if n > ultimo_lote.get(micro_id, 0):
-                try:
-                    await encolar(msg)
-                except Exception as e:
-                    # Sin ACK: el micro da el lote por no entregado y lo reenvía más tarde.
-                    print(f"micro {micro_id}: no pude encolar el lote {n} ({e}); no mando ACK", flush=True)
-                    continue
-                ultimo_lote[micro_id] = n
-            else:
-                print(f"  lote {n} del micro {micro_id} repetido, lo descarto", flush=True)
+            # El candado hace que "revisar si es nuevo + encolar + anotar" sea un solo bloque por micro:
+            # si dos conexiones del mismo micro mandan el mismo lote a la vez, la segunda espera y lo ve repetido.
+            candado = candados.setdefault(micro_id, asyncio.Lock())
+            async with candado:
+                if n > ultimo_lote.get(micro_id, 0):
+                    try:
+                        await encolar(msg)
+                    except Exception as e:
+                        # Sin ACK: el micro da el lote por no entregado y lo reenvía más tarde.
+                        print(f"micro {micro_id}: no pude encolar el lote {n} "
+                              f"({type(e).__name__}: {e}); no mando ACK", flush=True)
+                        continue
+                    ultimo_lote[micro_id] = n
+                else:
+                    print(f"  lote {n} del micro {micro_id} repetido, lo descarto", flush=True)
             # El ACK se manda también para los repetidos, así el micro deja de reenviarlos.
             writer.write(empaquetar({"tipo": "ack", "n": n}))
             await writer.drain()
