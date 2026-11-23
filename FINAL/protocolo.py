@@ -17,6 +17,8 @@ MAX_MENSAJE = 1_000_000  # bytes; protege al gateway de un largo absurdo
 def empaquetar(mensaje: dict) -> bytes:
     """Convierte un diccionario en bytes listos para mandar: [largo][JSON]."""
     datos = json.dumps(mensaje).encode("utf-8")
+    if len(datos) > MAX_MENSAJE:   # el mismo tope que se controla al leer
+        raise ValueError(f"mensaje demasiado grande: {len(datos)} bytes")
     return struct.pack(">I", len(datos)) + datos
 
 
